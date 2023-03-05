@@ -1,0 +1,252 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploys an EC2 with 
+Parameters:
+  KeyPair:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the container
+      instances
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be a valid EC2 keypair.
+  LoadBalancerSubnets:
+    Description: Subnet(s) for the load balancer
+    Type: List<AWS::EC2::Subnet::Id>
+  SubnetId:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+    ConstraintDescription: must be a valid EC2 instance type.
+  InstanceType:
+    Type: String
+    Default: t3a.small
+    AllowedValues:
+      - t3a.xlarge
+      - t3a.medium
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.small
+    Description: Please enter the instance type example t3a.medium,t3a.large,t3a.xlarge,t3a.2xlarge
+  AmiID:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: Query for the latest Amazon Linux AMI IDs using AWS Systems Manager Parameter Store
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  VpcId:
+    Description: VPC ID for resources
+    Type: AWS::EC2::VPC::Id
+  Owner:
+    Description: Used to tag resources
+    Type: String
+  DBName: 
+    Type: String
+    Description: Nombre de la base de datos
+    Default: wordpress
+  DBUsername: 
+    Type: String
+    Description: username de la base de datos
+    Default: root
+  DBPassword: 
+    Type: String
+    Description: password de la base de datos
+    Default: wordpress123
+  DBIntra1:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+  DBIntra2:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+  dbSize:
+    Description: MySQL Instance Storage Size.
+    Type: String
+    Default: 100
+
+Resources:
+  wazaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Owner}-wazaInstance-SG'
+      VpcId: !Ref VpcId
+      GroupDescription: Enable HTTP from the ApplicationLoadBalancer on dynamic ports
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${Owner}-wazaSecurityGroup'
+        - Key: Owner
+          Value: !Sub '${Owner}'
+  Ec2SsmIamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+      Policies:
+        - PolicyName: !Sub ${Owner}-sts-assume-role
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "sts:*"
+                Resource: "*"     
+
+  Ec2SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [!Ref Ec2SsmIamRole]
+  wazaInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: '30'
+            DeleteOnTermination: 'true'
+            Encrypted: 'true'
+      SecurityGroupIds:
+        - !Ref wazaSecurityGroup
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref Ec2SsmInstanceProfile
+      UserData: 
+        Fn::Base64: 
+          !Sub |
+          #!/bin/bash -xe
+          yum update -y
+          amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+          yum install -y httpd mariadb-server php-mysqlnd
+          systemctl start httpd
+          systemctl enable httpd
+          systemctl start mariadb
+          systemctl enable mariadb
+          mysql -e "CREATE DATABASE wordpress;"
+          mysql -e "CREATE USER 'wordpress'@'localhost' IDENTIFIED BY 'YOUR_PASSWORD_HERE';"
+          mysql -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'localhost';"
+          mysql -e "FLUSH PRIVILEGES;"
+          cd /var/www/html
+          curl -O https://wordpress.org/latest.tar.gz
+          tar -zxvf latest.tar.gz
+          cp -r wordpress/* .
+          rm -rf wordpress latest.tar.gz
+          chown -R apache:apache /var/www/html
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${Owner}-EC2-waza'
+        - Key: Owner
+          Value: !Sub '${Owner}'
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Ref DBName
+      DBSubnetGroupDescription: Subnets for my database
+      SubnetIds:
+        - !Ref DBIntra1
+        - !Ref DBIntra2
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.t2.micro
+      AllocatedStorage: !Ref dbSize 
+      Engine: mysql
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ApplicationLoadBalancer
+      VpcId:
+        Ref: VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      Tags:
+      - Key: Name
+        Value: ecs-inbound-access-to-loadbalancer
+      - Key: Owner
+        Value:
+          Ref: Owner
+          
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      SecurityGroups:
+      - Ref: LoadBalancerSecurityGroup
+      Subnets:
+        Ref: LoadBalancerSubnets
+      Tags:
+      - Key: Owner
+        Value:
+          Ref: Owner
+
+  ApplicationLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: NullTargetGroup
+      LoadBalancerArn:
+        Ref: ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  NullTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+    - ApplicationLoadBalancer
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: instance
+      Port: 80
+      Protocol: HTTP
+      VpcId:
+        Ref: VpcId
+      Matcher:
+        HttpCode: "302"
+      Targets:
+        - Id: !Ref wazaInstance
+          Port: 80
+
+Outputs:
+  InstanceId:
+    Description: waza InstanceId
+    Value: !Ref 'wazaInstance'
+    Export:
+      Name: !Sub '${Owner}-wazaInstanceId'
+  SgId:
+    Description: wazaInstance Security Group Id
+    Value: !Ref 'wazaSecurityGroup'
+
+
+
